@@ -1,0 +1,6 @@
+.streamlit/secrets.toml
+work_hours_data.xlsx
+work_hours_report.xlsx
+summary_by_student.xlsx
+__pycache__/
+.DS_Store
