@@ -33,7 +33,19 @@ COLUMNS = [
 
 def load_data():
     if DATA_FILE.exists():
-        return pd.read_excel(DATA_FILE)
+        df = pd.read_excel(DATA_FILE)
+
+        for col in COLUMNS:
+            if col not in df.columns:
+                df[col] = ""
+
+        df["Supervisor Note"] = df["Supervisor Note"].fillna("").astype(str)
+        df["Status"] = df["Status"].fillna("Pending").astype(str)
+        df["ID"] = pd.to_numeric(df["ID"], errors="coerce").fillna(0).astype(int)
+        df["Total Hours"] = pd.to_numeric(df["Total Hours"], errors="coerce").fillna(0)
+
+        return df[COLUMNS]
+
     return pd.DataFrame(columns=COLUMNS)
 
 
@@ -172,7 +184,7 @@ elif menu == "Supervisor Panel":
 
             st.subheader("Approve / Reject / Edit Record")
 
-            record_ids = filtered_df["ID"].tolist()
+            record_ids = filtered_df["ID"].dropna().astype(int).tolist()
 
             if record_ids:
                 selected_id = st.selectbox("Select record ID", record_ids)
@@ -182,23 +194,28 @@ elif menu == "Supervisor Panel":
                 st.write("Selected Record:")
                 st.write(selected_row)
 
+                current_status = selected_row["Status"]
+                if current_status not in ["Pending", "Approved", "Rejected"]:
+                    current_status = "Pending"
+
                 new_status = st.selectbox(
                     "Status",
                     ["Pending", "Approved", "Rejected"],
-                    index=["Pending", "Approved", "Rejected"].index(selected_row["Status"])
+                    index=["Pending", "Approved", "Rejected"].index(current_status)
                 )
 
                 supervisor_note = st.text_area(
                     "Supervisor Note",
-                    value="" if pd.isna(selected_row["Supervisor Note"]) else selected_row["Supervisor Note"]
+                    value="" if pd.isna(selected_row["Supervisor Note"]) else str(selected_row["Supervisor Note"])
                 )
 
                 col_a, col_b = st.columns(2)
 
                 with col_a:
                     if st.button("Update Record"):
-                        df.loc[df["ID"] == selected_id, "Status"] = new_status
-                        df.loc[df["ID"] == selected_id, "Supervisor Note"] = supervisor_note
+                        row_index = df.index[df["ID"] == selected_id][0]
+                        df.at[row_index, "Status"] = new_status
+                        df.at[row_index, "Supervisor Note"] = str(supervisor_note)
                         save_data(df)
                         st.success("Record updated successfully.")
                         st.rerun()
