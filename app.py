@@ -6,7 +6,7 @@ from pathlib import Path
 st.set_page_config(page_title="Work Hours System", layout="wide")
 
 DATA_FILE = Path("work_hours_data.xlsx")
-REQUIRED_HOURS = 180
+REQUIRED_HOURS = 360
 
 STUDENTS = [
     "Select Student",
