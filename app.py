@@ -1,12 +1,14 @@
 import streamlit as st
 import pandas as pd
+import gspread
+from google.oauth2.service_account import Credentials
 from datetime import datetime
-from pathlib import Path
 
 st.set_page_config(page_title="Work Hours System", layout="wide")
 
-DATA_FILE = Path("work_hours_data.xlsx")
 REQUIRED_HOURS = 360
+SHEET_NAME = "Food Security Work Hours"
+WORKSHEET_NAME = "Hoja 1"
 
 STUDENTS = [
     "Select Student",
@@ -31,26 +33,48 @@ COLUMNS = [
 ]
 
 
+def connect_sheet():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+
+    credentials = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=scopes
+    )
+
+    client = gspread.authorize(credentials)
+    spreadsheet = client.open(SHEET_NAME)
+    worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
+    return worksheet
+
+
 def load_data():
-    if DATA_FILE.exists():
-        df = pd.read_excel(DATA_FILE)
+    worksheet = connect_sheet()
+    records = worksheet.get_all_records()
 
-        for col in COLUMNS:
-            if col not in df.columns:
-                df[col] = ""
+    if not records:
+        return pd.DataFrame(columns=COLUMNS)
 
-        df["Supervisor Note"] = df["Supervisor Note"].fillna("").astype(str)
-        df["Status"] = df["Status"].fillna("Pending").astype(str)
-        df["ID"] = pd.to_numeric(df["ID"], errors="coerce").fillna(0).astype(int)
-        df["Total Hours"] = pd.to_numeric(df["Total Hours"], errors="coerce").fillna(0)
+    df = pd.DataFrame(records)
 
-        return df[COLUMNS]
+    for col in COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
 
-    return pd.DataFrame(columns=COLUMNS)
+    df["ID"] = pd.to_numeric(df["ID"], errors="coerce").fillna(0).astype(int)
+    df["Total Hours"] = pd.to_numeric(df["Total Hours"], errors="coerce").fillna(0)
+    df["Status"] = df["Status"].fillna("Pending").astype(str)
+    df["Supervisor Note"] = df["Supervisor Note"].fillna("").astype(str)
+
+    return df[COLUMNS]
 
 
 def save_data(df):
-    df.to_excel(DATA_FILE, index=False)
+    worksheet = connect_sheet()
+    worksheet.clear()
+    worksheet.update([COLUMNS] + df[COLUMNS].astype(str).values.tolist())
 
 
 def calculate_hours(entry_time, exit_time):
@@ -93,7 +117,6 @@ if menu == "Register Hours":
                     st.error("Exit time cannot be earlier than entry time.")
                 else:
                     df = load_data()
-
                     new_id = 1 if df.empty else int(df["ID"].max()) + 1
 
                     new_row = {
@@ -229,27 +252,19 @@ elif menu == "Supervisor Panel":
 
             st.subheader("Download Reports")
 
-            excel_file = "work_hours_report.xlsx"
-            filtered_df.to_excel(excel_file, index=False)
+            st.download_button(
+                label="Download Filtered Excel Report",
+                data=filtered_df.to_csv(index=False).encode("utf-8"),
+                file_name="work_hours_report.csv",
+                mime="text/csv"
+            )
 
-            with open(excel_file, "rb") as file:
-                st.download_button(
-                    label="Download Filtered Excel Report",
-                    data=file,
-                    file_name="work_hours_report.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
-
-            summary_file = "summary_by_student.xlsx"
-            summary.to_excel(summary_file, index=False)
-
-            with open(summary_file, "rb") as file:
-                st.download_button(
-                    label="Download Summary by Student",
-                    data=file,
-                    file_name="summary_by_student.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+            st.download_button(
+                label="Download Summary by Student",
+                data=summary.to_csv(index=False).encode("utf-8"),
+                file_name="summary_by_student.csv",
+                mime="text/csv"
+            )
 
     elif password:
         st.error("Incorrect password.")
