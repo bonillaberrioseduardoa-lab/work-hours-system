@@ -91,7 +91,7 @@ st.title("Work Hours Registration System")
 
 menu = st.sidebar.radio(
     "Select Section",
-    ["Register Hours", "Supervisor Panel"]
+    ["Register Hours", "Student Panel", "Supervisor Panel"]
 )
 
 if menu == "Register Hours":
@@ -138,7 +138,76 @@ if menu == "Register Hours":
 
                     st.success("Hours submitted successfully.")
                     st.info(f"Total hours registered: {total_hours}")
+elif menu == "Student Panel":
+    st.header("Student Work Hours Panel")
 
+    student_name = st.selectbox("Select your name", STUDENTS)
+
+    student_password = st.text_input("Enter your password", type="password")
+
+    if student_name != "Select Student" and student_password:
+        correct_password = st.secrets["student_passwords"].get(student_name, "")
+
+        if student_password == correct_password:
+            st.success(f"Welcome, {student_name}.")
+
+            df = load_data()
+
+            student_df = df[df["Student/Worker"] == student_name].copy()
+
+            if student_df.empty:
+                st.warning("You do not have submitted records yet.")
+            else:
+                total_submitted = round(student_df["Total Hours"].sum(), 2)
+
+                approved_df = student_df[student_df["Status"] == "Approved"]
+                pending_df = student_df[student_df["Status"] == "Pending"]
+                rejected_df = student_df[student_df["Status"] == "Rejected"]
+
+                approved_hours = round(approved_df["Total Hours"].sum(), 2)
+                pending_hours = round(pending_df["Total Hours"].sum(), 2)
+                rejected_hours = round(rejected_df["Total Hours"].sum(), 2)
+
+                remaining_hours = max(REQUIRED_HOURS - approved_hours, 0)
+                progress = round((approved_hours / REQUIRED_HOURS) * 100, 2)
+
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("Approved Hours", approved_hours)
+                col2.metric("Pending Hours", pending_hours)
+                col3.metric("Remaining Hours", remaining_hours)
+                col4.metric("Progress", f"{progress}%")
+
+                st.progress(min(progress / 100, 1.0))
+
+                st.subheader("Your Submitted Records")
+
+                st.dataframe(
+                    student_df[
+                        [
+                            "Date",
+                            "Entry Time",
+                            "Exit Time",
+                            "Total Hours",
+                            "Work Type",
+                            "Remark",
+                            "Status",
+                            "Supervisor Note",
+                            "Submitted At"
+                        ]
+                    ],
+                    use_container_width=True
+                )
+
+                st.download_button(
+                    label="Download My Records",
+                    data=student_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"{student_name.replace(' ', '_')}_work_hours.csv",
+                    mime="text/csv"
+                )
+
+        else:
+            st.error("Incorrect password.")
+            
 elif menu == "Supervisor Panel":
     st.header("Supervisor Panel")
 
