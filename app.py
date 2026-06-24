@@ -6,7 +6,7 @@ from datetime import datetime
 
 st.set_page_config(page_title="Work Hours System", layout="wide")
 
-REQUIRED_HOURS = 360
+REQUIRED_HOURS = 330
 SHEET_NAME = "Food Security Work Hours"
 WORKSHEET_NAME = "Hoja 1"
 
