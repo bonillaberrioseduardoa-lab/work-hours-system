@@ -64,13 +64,17 @@ def get_worksheet(sheet_name, headers):
     try:
         worksheet = spreadsheet.worksheet(sheet_name)
     except gspread.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=len(headers))
+        worksheet = spreadsheet.add_worksheet(
+            title=sheet_name,
+            rows=1000,
+            cols=len(headers)
+        )
         worksheet.append_row(headers)
 
     existing_headers = worksheet.row_values(1)
-    if existing_headers != headers:
-        if not existing_headers:
-            worksheet.append_row(headers)
+
+    if not existing_headers:
+        worksheet.append_row(headers)
 
     return worksheet
 
@@ -85,6 +89,22 @@ def backup_sheet():
 
 def audit_sheet():
     return get_worksheet(AUDIT_SHEET_NAME, AUDIT_COLUMNS)
+
+
+def log_action(action, student, record_id, details):
+    try:
+        audit_sheet().append_row(
+            [
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                action,
+                student,
+                record_id,
+                details
+            ],
+            value_input_option="USER_ENTERED"
+        )
+    except Exception:
+        pass
 
 
 def load_data():
@@ -122,19 +142,6 @@ def append_record(row_dict):
     )
 
 
-def log_action(action, student, record_id, details):
-    audit_sheet().append_row(
-        [
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            action,
-            student,
-            record_id,
-            details
-        ],
-        value_input_option="USER_ENTERED"
-    )
-
-
 def update_record_in_sheet(record_id, new_status, supervisor_note):
     worksheet = main_sheet()
     all_values = worksheet.get_all_values()
@@ -148,17 +155,20 @@ def update_record_in_sheet(record_id, new_status, supervisor_note):
         id_col = headers.index("ID") + 1
         status_col = headers.index("Status") + 1
         note_col = headers.index("Supervisor Note") + 1
+        student_col = headers.index("Student/Worker") + 1
     except ValueError:
         return False
 
     for row_number, row in enumerate(all_values[1:], start=2):
         if len(row) >= id_col and str(row[id_col - 1]) == str(record_id):
+            student_name = row[student_col - 1] if len(row) >= student_col else ""
+
             worksheet.update_cell(row_number, status_col, new_status)
             worksheet.update_cell(row_number, note_col, supervisor_note)
 
             log_action(
-                action="UPDATE",
-                student="",
+                action="UPDATE_RECORD",
+                student=student_name,
                 record_id=record_id,
                 details=f"Status changed to {new_status}. Supervisor note updated."
             )
@@ -180,23 +190,26 @@ def void_record_in_sheet(record_id):
         id_col = headers.index("ID") + 1
         status_col = headers.index("Status") + 1
         note_col = headers.index("Supervisor Note") + 1
+        student_col = headers.index("Student/Worker") + 1
     except ValueError:
         return False
 
     for row_number, row in enumerate(all_values[1:], start=2):
         if len(row) >= id_col and str(row[id_col - 1]) == str(record_id):
-            existing_note = ""
-            if len(row) >= note_col:
-                existing_note = row[note_col - 1]
+            student_name = row[student_col - 1] if len(row) >= student_col else ""
+            existing_note = row[note_col - 1] if len(row) >= note_col else ""
 
-            new_note = f"{existing_note} | Voided by supervisor on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}".strip(" |")
+            new_note = (
+                f"{existing_note} | Voided by supervisor on "
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            ).strip(" |")
 
             worksheet.update_cell(row_number, status_col, "Voided")
             worksheet.update_cell(row_number, note_col, new_note)
 
             log_action(
-                action="VOID",
-                student="",
+                action="VOID_RECORD",
+                student=student_name,
                 record_id=record_id,
                 details="Record was marked as Voided instead of deleted."
             )
@@ -215,11 +228,26 @@ def calculate_hours(entry_time, exit_time):
     return round((exit_dt - entry_dt).total_seconds() / 3600, 2)
 
 
+def load_audit_data():
+    records = audit_sheet().get_all_records()
+
+    if not records:
+        return pd.DataFrame(columns=AUDIT_COLUMNS)
+
+    df = pd.DataFrame(records)
+
+    for col in AUDIT_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+
+    return df[AUDIT_COLUMNS]
+
+
 st.title("Work Hours Registration System")
 
 menu = st.sidebar.radio(
     "Select Section",
-    ["Register Hours", "Student Panel", "Supervisor Panel"]
+    ["Register Hours", "Student Panel", "Supervisor Panel", "Admin Panel"]
 )
 
 if menu == "Register Hours":
@@ -278,6 +306,13 @@ elif menu == "Student Panel":
         if student_password == correct_password:
             st.success(f"Welcome, {student_name}.")
 
+            log_action(
+                action="LOGIN_STUDENT",
+                student=student_name,
+                record_id="",
+                details="Student accessed Student Panel."
+            )
+
             df = load_data()
             student_df = df[df["Student/Worker"] == student_name].copy()
 
@@ -297,12 +332,14 @@ elif menu == "Student Panel":
                 remaining_hours = max(REQUIRED_HOURS - approved_hours, 0)
                 progress = round((approved_hours / REQUIRED_HOURS) * 100, 2)
 
-                col1, col2, col3, col4 = st.columns(4)
+                col1, col2, col3, col4, col5 = st.columns(5)
                 col1.metric("Approved Hours", approved_hours)
                 col2.metric("Pending Hours", pending_hours)
-                col3.metric("Remaining Hours", remaining_hours)
-                col4.metric("Progress", f"{progress}%")
+                col3.metric("Rejected Hours", rejected_hours)
+                col4.metric("Voided Hours", voided_hours)
+                col5.metric("Remaining Hours", remaining_hours)
 
+                st.metric("Progress", f"{progress}%")
                 st.progress(min(progress / 100, 1.0))
 
                 st.subheader("Your Submitted Records")
@@ -331,6 +368,12 @@ elif menu == "Student Panel":
                     mime="text/csv"
                 )
         else:
+            log_action(
+                action="FAILED_LOGIN_STUDENT",
+                student=student_name,
+                record_id="",
+                details="Incorrect student password attempt."
+            )
             st.error("Incorrect password.")
 
 elif menu == "Supervisor Panel":
@@ -340,6 +383,13 @@ elif menu == "Supervisor Panel":
 
     if password == st.secrets["ADMIN_PASSWORD"]:
         st.success("Access granted.")
+
+        log_action(
+            action="LOGIN_SUPERVISOR",
+            student="Supervisor",
+            record_id="",
+            details="Supervisor accessed Supervisor Panel."
+        )
 
         df = load_data()
 
@@ -435,7 +485,11 @@ elif menu == "Supervisor Panel":
 
                 with col_a:
                     if st.button("Update Record"):
-                        success = update_record_in_sheet(selected_id, new_status, supervisor_note)
+                        success = update_record_in_sheet(
+                            selected_id,
+                            new_status,
+                            supervisor_note
+                        )
 
                         if success:
                             st.success("Record updated successfully.")
@@ -470,4 +524,78 @@ elif menu == "Supervisor Panel":
             )
 
     elif password:
+        log_action(
+            action="FAILED_LOGIN_SUPERVISOR",
+            student="Supervisor",
+            record_id="",
+            details="Incorrect supervisor password attempt."
+        )
         st.error("Incorrect password.")
+
+elif menu == "Admin Panel":
+    st.header("Admin Audit Panel")
+
+    admin_password = st.text_input("Enter admin password", type="password")
+
+    if admin_password == st.secrets["ADMIN_PASSWORD"]:
+        st.success("Admin access granted.")
+
+        log_action(
+            action="LOGIN_ADMIN",
+            student="Admin",
+            record_id="",
+            details="Admin accessed Audit Panel."
+        )
+
+        audit_df = load_audit_data()
+
+        if audit_df.empty:
+            st.warning("No audit records yet.")
+        else:
+            st.subheader("Audit Summary")
+
+            total_events = len(audit_df)
+            failed_logins = len(audit_df[audit_df["Action"].astype(str).str.contains("FAILED", na=False)])
+            student_logins = len(audit_df[audit_df["Action"] == "LOGIN_STUDENT"])
+            supervisor_logins = len(audit_df[audit_df["Action"] == "LOGIN_SUPERVISOR"])
+
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Total Events", total_events)
+            col2.metric("Failed Logins", failed_logins)
+            col3.metric("Student Logins", student_logins)
+            col4.metric("Supervisor Logins", supervisor_logins)
+
+            st.subheader("Filters")
+
+            action_options = ["All"] + sorted(audit_df["Action"].dropna().unique().tolist())
+            selected_action = st.selectbox("Filter by action", action_options)
+
+            user_options = ["All"] + sorted(audit_df["Student/Worker"].dropna().unique().tolist())
+            selected_user = st.selectbox("Filter by user", user_options)
+
+            filtered_audit = audit_df.copy()
+
+            if selected_action != "All":
+                filtered_audit = filtered_audit[filtered_audit["Action"] == selected_action]
+
+            if selected_user != "All":
+                filtered_audit = filtered_audit[filtered_audit["Student/Worker"] == selected_user]
+
+            st.subheader("Audit Log")
+            st.dataframe(filtered_audit, use_container_width=True)
+
+            st.download_button(
+                label="Download Audit Log",
+                data=filtered_audit.to_csv(index=False).encode("utf-8"),
+                file_name="audit_log.csv",
+                mime="text/csv"
+            )
+
+    elif admin_password:
+        log_action(
+            action="FAILED_LOGIN_ADMIN",
+            student="Admin",
+            record_id="",
+            details="Incorrect admin password attempt."
+        )
+        st.error("Incorrect admin password.")
