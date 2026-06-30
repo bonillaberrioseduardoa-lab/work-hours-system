@@ -537,7 +537,7 @@ elif menu == "Admin Panel":
 
     admin_password = st.text_input("Enter admin password", type="password")
 
-    if admin_password == st.secrets["ADMIN_PASSWORD"]:
+    if admin_password == st.secrets["AUDIT_PASSWORD"]:
         st.success("Admin access granted.")
 
         log_action(
