@@ -2,11 +2,13 @@ import streamlit as st
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime
+from datetime import datetime, date
 
 st.set_page_config(page_title="Work Hours System", layout="wide")
 
 REQUIRED_HOURS = 330
+DEADLINE_DATE = date(2026, 8, 24)
+
 SHEET_NAME = "Food Security Work Hours"
 WORKSHEET_NAME = "Hoja 1"
 BACKUP_SHEET_NAME = "Backup"
@@ -124,6 +126,7 @@ def load_data():
     df["Total Hours"] = pd.to_numeric(df["Total Hours"], errors="coerce").fillna(0)
     df["Status"] = df["Status"].fillna("Pending").astype(str)
     df["Supervisor Note"] = df["Supervisor Note"].fillna("").astype(str)
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
 
     return df[COLUMNS]
 
@@ -243,6 +246,49 @@ def load_audit_data():
     return df[AUDIT_COLUMNS]
 
 
+def generate_monthly_report(student_df, student_name):
+    if student_df.empty:
+        return "No records available to generate a report."
+
+    report_df = student_df.copy()
+    report_df["Date"] = pd.to_datetime(report_df["Date"], errors="coerce")
+    report_df = report_df.dropna(subset=["Date"])
+
+    if report_df.empty:
+        return "No valid dates available to generate a report."
+
+    latest_month = report_df["Date"].max().strftime("%B %Y")
+    month_df = report_df[report_df["Date"].dt.strftime("%B %Y") == latest_month]
+
+    total_hours = round(month_df["Total Hours"].sum(), 2)
+    approved_hours = round(month_df[month_df["Status"] == "Approved"]["Total Hours"].sum(), 2)
+    pending_hours = round(month_df[month_df["Status"] == "Pending"]["Total Hours"].sum(), 2)
+
+    work_types = month_df["Work Type"].value_counts().to_dict()
+    work_type_text = ", ".join([f"{k}: {v} records" for k, v in work_types.items()])
+
+    remarks = month_df["Remark"].dropna().astype(str).tolist()
+    remarks_text = " ".join(remarks[:8])
+
+    return f"""
+Monthly Work Summary - {latest_month}
+
+Student: {student_name}
+
+During {latest_month}, {student_name} submitted {total_hours} total work hours. 
+Out of those hours, {approved_hours} have been approved and {pending_hours} are currently pending review.
+
+Work Type Distribution:
+{work_type_text}
+
+Summary of Work Performed:
+Based on the submitted remarks, the work completed during this period included:
+{remarks_text}
+
+Overall, the records show continued progress toward the required {REQUIRED_HOURS} hours for the program.
+"""
+
+
 st.title("Work Hours Registration System")
 
 menu = st.sidebar.radio(
@@ -255,7 +301,7 @@ if menu == "Register Hours":
 
     with st.form("hours_form"):
         name = st.selectbox("Student/Worker Name", STUDENTS)
-        date = st.date_input("Date")
+        date_selected = st.date_input("Date")
         entry_time = st.time_input("Entry Time")
         exit_time = st.time_input("Exit Time")
         work_type = st.selectbox("Work Type", ["In Person", "Virtual"])
@@ -278,7 +324,7 @@ if menu == "Register Hours":
                     new_row = {
                         "ID": new_id,
                         "Student/Worker": name,
-                        "Date": date.strftime("%Y-%m-%d"),
+                        "Date": date_selected.strftime("%Y-%m-%d"),
                         "Entry Time": entry_time.strftime("%H:%M"),
                         "Exit Time": exit_time.strftime("%H:%M"),
                         "Total Hours": total_hours,
@@ -319,9 +365,12 @@ elif menu == "Student Panel":
             if student_df.empty:
                 st.warning("You do not have submitted records yet.")
             else:
-                approved_df = student_df[student_df["Status"] == "Approved"]
-                pending_df = student_df[student_df["Status"] == "Pending"]
-                rejected_df = student_df[student_df["Status"] == "Rejected"]
+                student_df["Date"] = pd.to_datetime(student_df["Date"], errors="coerce")
+                active_student_df = student_df[student_df["Status"] != "Voided"].copy()
+
+                approved_df = active_student_df[active_student_df["Status"] == "Approved"]
+                pending_df = active_student_df[active_student_df["Status"] == "Pending"]
+                rejected_df = active_student_df[active_student_df["Status"] == "Rejected"]
                 voided_df = student_df[student_df["Status"] == "Voided"]
 
                 approved_hours = round(approved_df["Total Hours"].sum(), 2)
@@ -329,23 +378,96 @@ elif menu == "Student Panel":
                 rejected_hours = round(rejected_df["Total Hours"].sum(), 2)
                 voided_hours = round(voided_df["Total Hours"].sum(), 2)
 
+                total_active_hours = round(active_student_df["Total Hours"].sum(), 2)
                 remaining_hours = max(REQUIRED_HOURS - approved_hours, 0)
                 progress = round((approved_hours / REQUIRED_HOURS) * 100, 2)
+
+                today = date.today()
+                days_left = max((DEADLINE_DATE - today).days, 0)
+                hours_per_day_needed = round(remaining_hours / days_left, 2) if days_left > 0 else remaining_hours
+                estimated_4hr_days = round(remaining_hours / 4, 1) if remaining_hours > 0 else 0
+
+                st.subheader("Personal Progress Dashboard")
 
                 col1, col2, col3, col4, col5 = st.columns(5)
                 col1.metric("Approved Hours", approved_hours)
                 col2.metric("Pending Hours", pending_hours)
                 col3.metric("Rejected Hours", rejected_hours)
-                col4.metric("Voided Hours", voided_hours)
-                col5.metric("Remaining Hours", remaining_hours)
+                col4.metric("Remaining Hours", remaining_hours)
+                col5.metric("Progress", f"{progress}%")
 
-                st.metric("Progress", f"{progress}%")
                 st.progress(min(progress / 100, 1.0))
+                st.caption(f"{approved_hours} approved hours out of {REQUIRED_HOURS} required hours.")
+
+                st.subheader("Next Goal")
+
+                goal_col1, goal_col2, goal_col3 = st.columns(3)
+                goal_col1.metric("Deadline", DEADLINE_DATE.strftime("%B %d, %Y"))
+                goal_col2.metric("Days Left", days_left)
+                goal_col3.metric("Hours/Day Needed", hours_per_day_needed)
+
+                st.info(
+                    f"You need approximately {estimated_4hr_days} more workdays "
+                    f"of 4 hours each to complete the remaining {remaining_hours} hours."
+                )
+
+                st.subheader("Monthly Activity")
+
+                monthly_df = active_student_df.dropna(subset=["Date"]).copy()
+                if not monthly_df.empty:
+                    monthly_df["Month"] = monthly_df["Date"].dt.strftime("%B %Y")
+                    monthly_summary = (
+                        monthly_df.groupby("Month")["Total Hours"]
+                        .sum()
+                        .reset_index()
+                        .rename(columns={"Total Hours": "Hours"})
+                    )
+
+                    st.dataframe(monthly_summary, use_container_width=True)
+                    st.bar_chart(monthly_summary.set_index("Month"))
+                else:
+                    st.warning("No valid monthly activity available yet.")
+
+                st.subheader("Work Calendar")
+
+                calendar_df = active_student_df.dropna(subset=["Date"]).copy()
+                if not calendar_df.empty:
+                    calendar_df["Day"] = calendar_df["Date"].dt.date
+                    day_summary = (
+                        calendar_df.groupby("Day")["Total Hours"]
+                        .sum()
+                        .reset_index()
+                        .sort_values("Day", ascending=False)
+                    )
+
+                    day_summary["Worked?"] = day_summary["Total Hours"].apply(
+                        lambda x: "🟢 Worked" if x > 0 else "⚪ No hours"
+                    )
+
+                    st.dataframe(day_summary, use_container_width=True)
+                else:
+                    st.warning("No calendar records available yet.")
+
+                st.subheader("Monthly Report Generator")
+
+                if st.button("Generate Monthly Report"):
+                    report_text = generate_monthly_report(active_student_df, student_name)
+                    st.text_area("Generated Monthly Report", report_text, height=300)
+
+                    st.download_button(
+                        label="Download Monthly Report",
+                        data=report_text.encode("utf-8"),
+                        file_name=f"{student_name.replace(' ', '_')}_monthly_report.txt",
+                        mime="text/plain"
+                    )
 
                 st.subheader("Your Submitted Records")
 
+                display_df = student_df.copy()
+                display_df["Date"] = display_df["Date"].dt.strftime("%Y-%m-%d")
+
                 st.dataframe(
-                    student_df[
+                    display_df[
                         [
                             "Date",
                             "Entry Time",
