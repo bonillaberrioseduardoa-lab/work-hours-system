@@ -9,6 +9,8 @@ st.set_page_config(page_title="Work Hours System", layout="wide")
 REQUIRED_HOURS = 330
 SHEET_NAME = "Food Security Work Hours"
 WORKSHEET_NAME = "Hoja 1"
+BACKUP_SHEET_NAME = "Backup"
+AUDIT_SHEET_NAME = "Audit Log"
 
 STUDENTS = [
     "Select Student",
@@ -32,8 +34,16 @@ COLUMNS = [
     "Submitted At"
 ]
 
+AUDIT_COLUMNS = [
+    "Timestamp",
+    "Action",
+    "Student/Worker",
+    "Record ID",
+    "Details"
+]
 
-def connect_sheet():
+
+def connect_spreadsheet():
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
@@ -45,13 +55,40 @@ def connect_sheet():
     )
 
     client = gspread.authorize(credentials)
-    spreadsheet = client.open(SHEET_NAME)
-    worksheet = spreadsheet.worksheet(WORKSHEET_NAME)
+    return client.open(SHEET_NAME)
+
+
+def get_worksheet(sheet_name, headers):
+    spreadsheet = connect_spreadsheet()
+
+    try:
+        worksheet = spreadsheet.worksheet(sheet_name)
+    except gspread.WorksheetNotFound:
+        worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=len(headers))
+        worksheet.append_row(headers)
+
+    existing_headers = worksheet.row_values(1)
+    if existing_headers != headers:
+        if not existing_headers:
+            worksheet.append_row(headers)
+
     return worksheet
 
 
+def main_sheet():
+    return get_worksheet(WORKSHEET_NAME, COLUMNS)
+
+
+def backup_sheet():
+    return get_worksheet(BACKUP_SHEET_NAME, COLUMNS)
+
+
+def audit_sheet():
+    return get_worksheet(AUDIT_SHEET_NAME, AUDIT_COLUMNS)
+
+
 def load_data():
-    worksheet = connect_sheet()
+    worksheet = main_sheet()
     records = worksheet.get_all_records()
 
     if not records:
@@ -71,10 +108,101 @@ def load_data():
     return df[COLUMNS]
 
 
-def save_data(df):
-    worksheet = connect_sheet()
-    worksheet.clear()
-    worksheet.update([COLUMNS] + df[COLUMNS].astype(str).values.tolist())
+def append_record(row_dict):
+    row = [row_dict.get(col, "") for col in COLUMNS]
+
+    main_sheet().append_row(row, value_input_option="USER_ENTERED")
+    backup_sheet().append_row(row, value_input_option="USER_ENTERED")
+
+    log_action(
+        action="SUBMIT",
+        student=row_dict.get("Student/Worker", ""),
+        record_id=row_dict.get("ID", ""),
+        details="New work-hours record submitted and backed up."
+    )
+
+
+def log_action(action, student, record_id, details):
+    audit_sheet().append_row(
+        [
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            action,
+            student,
+            record_id,
+            details
+        ],
+        value_input_option="USER_ENTERED"
+    )
+
+
+def update_record_in_sheet(record_id, new_status, supervisor_note):
+    worksheet = main_sheet()
+    all_values = worksheet.get_all_values()
+
+    if not all_values:
+        return False
+
+    headers = all_values[0]
+
+    try:
+        id_col = headers.index("ID") + 1
+        status_col = headers.index("Status") + 1
+        note_col = headers.index("Supervisor Note") + 1
+    except ValueError:
+        return False
+
+    for row_number, row in enumerate(all_values[1:], start=2):
+        if len(row) >= id_col and str(row[id_col - 1]) == str(record_id):
+            worksheet.update_cell(row_number, status_col, new_status)
+            worksheet.update_cell(row_number, note_col, supervisor_note)
+
+            log_action(
+                action="UPDATE",
+                student="",
+                record_id=record_id,
+                details=f"Status changed to {new_status}. Supervisor note updated."
+            )
+            return True
+
+    return False
+
+
+def void_record_in_sheet(record_id):
+    worksheet = main_sheet()
+    all_values = worksheet.get_all_values()
+
+    if not all_values:
+        return False
+
+    headers = all_values[0]
+
+    try:
+        id_col = headers.index("ID") + 1
+        status_col = headers.index("Status") + 1
+        note_col = headers.index("Supervisor Note") + 1
+    except ValueError:
+        return False
+
+    for row_number, row in enumerate(all_values[1:], start=2):
+        if len(row) >= id_col and str(row[id_col - 1]) == str(record_id):
+            existing_note = ""
+            if len(row) >= note_col:
+                existing_note = row[note_col - 1]
+
+            new_note = f"{existing_note} | Voided by supervisor on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}".strip(" |")
+
+            worksheet.update_cell(row_number, status_col, "Voided")
+            worksheet.update_cell(row_number, note_col, new_note)
+
+            log_action(
+                action="VOID",
+                student="",
+                record_id=record_id,
+                details="Record was marked as Voided instead of deleted."
+            )
+            return True
+
+    return False
 
 
 def calculate_hours(entry_time, exit_time):
@@ -133,16 +261,15 @@ if menu == "Register Hours":
                         "Submitted At": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     }
 
-                    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-                    save_data(df)
+                    append_record(new_row)
 
                     st.success("Hours submitted successfully.")
                     st.info(f"Total hours registered: {total_hours}")
+
 elif menu == "Student Panel":
     st.header("Student Work Hours Panel")
 
     student_name = st.selectbox("Select your name", STUDENTS)
-
     student_password = st.text_input("Enter your password", type="password")
 
     if student_name != "Select Student" and student_password:
@@ -152,21 +279,20 @@ elif menu == "Student Panel":
             st.success(f"Welcome, {student_name}.")
 
             df = load_data()
-
             student_df = df[df["Student/Worker"] == student_name].copy()
 
             if student_df.empty:
                 st.warning("You do not have submitted records yet.")
             else:
-                total_submitted = round(student_df["Total Hours"].sum(), 2)
-
                 approved_df = student_df[student_df["Status"] == "Approved"]
                 pending_df = student_df[student_df["Status"] == "Pending"]
                 rejected_df = student_df[student_df["Status"] == "Rejected"]
+                voided_df = student_df[student_df["Status"] == "Voided"]
 
                 approved_hours = round(approved_df["Total Hours"].sum(), 2)
                 pending_hours = round(pending_df["Total Hours"].sum(), 2)
                 rejected_hours = round(rejected_df["Total Hours"].sum(), 2)
+                voided_hours = round(voided_df["Total Hours"].sum(), 2)
 
                 remaining_hours = max(REQUIRED_HOURS - approved_hours, 0)
                 progress = round((approved_hours / REQUIRED_HOURS) * 100, 2)
@@ -204,10 +330,9 @@ elif menu == "Student Panel":
                     file_name=f"{student_name.replace(' ', '_')}_work_hours.csv",
                     mime="text/csv"
                 )
-
         else:
             st.error("Incorrect password.")
-            
+
 elif menu == "Supervisor Panel":
     st.header("Supervisor Panel")
 
@@ -223,21 +348,25 @@ elif menu == "Supervisor Panel":
         else:
             st.subheader("Summary Dashboard")
 
-            total_hours = round(df["Total Hours"].sum(), 2)
+            total_hours = round(df[df["Status"] != "Voided"]["Total Hours"].sum(), 2)
             pending_count = len(df[df["Status"] == "Pending"])
             approved_count = len(df[df["Status"] == "Approved"])
             rejected_count = len(df[df["Status"] == "Rejected"])
+            voided_count = len(df[df["Status"] == "Voided"])
 
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric("Total Hours", total_hours)
             col2.metric("Pending", pending_count)
             col3.metric("Approved", approved_count)
             col4.metric("Rejected", rejected_count)
+            col5.metric("Voided", voided_count)
 
             st.subheader("Progress by Student")
 
+            active_df = df[df["Status"] != "Voided"].copy()
+
             summary = (
-                df.groupby("Student/Worker")["Total Hours"]
+                active_df.groupby("Student/Worker")["Total Hours"]
                 .sum()
                 .reset_index()
                 .sort_values(by="Student/Worker")
@@ -280,20 +409,21 @@ elif menu == "Supervisor Panel":
 
             if record_ids:
                 selected_id = st.selectbox("Select record ID", record_ids)
-
                 selected_row = df[df["ID"] == selected_id].iloc[0]
 
                 st.write("Selected Record:")
                 st.write(selected_row)
 
+                status_options = ["Pending", "Approved", "Rejected", "Voided"]
+
                 current_status = selected_row["Status"]
-                if current_status not in ["Pending", "Approved", "Rejected"]:
+                if current_status not in status_options:
                     current_status = "Pending"
 
                 new_status = st.selectbox(
                     "Status",
-                    ["Pending", "Approved", "Rejected"],
-                    index=["Pending", "Approved", "Rejected"].index(current_status)
+                    status_options,
+                    index=status_options.index(current_status)
                 )
 
                 supervisor_note = st.text_area(
@@ -305,24 +435,28 @@ elif menu == "Supervisor Panel":
 
                 with col_a:
                     if st.button("Update Record"):
-                        row_index = df.index[df["ID"] == selected_id][0]
-                        df.at[row_index, "Status"] = new_status
-                        df.at[row_index, "Supervisor Note"] = str(supervisor_note)
-                        save_data(df)
-                        st.success("Record updated successfully.")
-                        st.rerun()
+                        success = update_record_in_sheet(selected_id, new_status, supervisor_note)
+
+                        if success:
+                            st.success("Record updated successfully.")
+                            st.rerun()
+                        else:
+                            st.error("Could not update record.")
 
                 with col_b:
-                    if st.button("Delete Record"):
-                        df = df[df["ID"] != selected_id]
-                        save_data(df)
-                        st.warning("Record deleted.")
-                        st.rerun()
+                    if st.button("Void Record Instead of Delete"):
+                        success = void_record_in_sheet(selected_id)
+
+                        if success:
+                            st.warning("Record marked as Voided. It was not deleted.")
+                            st.rerun()
+                        else:
+                            st.error("Could not void record.")
 
             st.subheader("Download Reports")
 
             st.download_button(
-                label="Download Filtered Excel Report",
+                label="Download Filtered CSV Report",
                 data=filtered_df.to_csv(index=False).encode("utf-8"),
                 file_name="work_hours_report.csv",
                 mime="text/csv"
